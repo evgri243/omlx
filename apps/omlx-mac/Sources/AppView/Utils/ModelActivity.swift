@@ -122,13 +122,18 @@ struct ModelActivitySnapshot: Equatable, Sendable {
 // MARK: - Formatting
 
 enum ActivityFormat {
-    static func tokens(_ count: Int) -> String {
+    static func tokens(_ count: Int, locale: Locale = .current) -> String {
         if count >= 1_000_000 {
             let millions = Double(count) / 1_000_000
             return String(format: millions >= 10 ? "%.0fM" : "%.1fM", millions)
         }
-        if count >= 1_000 { return "\(Int((Double(count) / 1_000).rounded()))k" }
-        return "\(count)"
+        if count >= 100_000 { return "\(Int((Double(count) / 1_000).rounded()))k" }
+        if count >= 10_000 {
+            let thousands = Double(count) / 1_000
+            let compact = String(format: "%.1f", thousands)
+            return "\(compact.hasSuffix(".0") ? String(compact.dropLast(2)) : compact)k"
+        }
+        return count.formatted(.number.grouping(.automatic).locale(locale))
     }
 
     /// Decode rates sit in the tens, prefill rates in the thousands.
