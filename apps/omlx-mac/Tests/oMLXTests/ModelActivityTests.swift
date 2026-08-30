@@ -88,7 +88,7 @@ final class ModelActivityTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(snapshot.requests[0].fraction), 0.62, accuracy: 0.001)
         XCTAssertEqual(snapshot.requests[0].percentText, "62%")
         XCTAssertEqual(snapshot.requests[1].percentText, "18%")
-        XCTAssertTrue(snapshot.requests[0].detail.contains("12k / 20k tok"),
+        XCTAssertTrue(snapshot.requests[0].detail.contains("12.4k / 20k tok"),
                       snapshot.requests[0].detail)
         XCTAssertTrue(snapshot.requests[0].detail.contains("1.8k tok/s"),
                       snapshot.requests[0].detail)
@@ -125,6 +125,18 @@ final class ModelActivityTests: XCTestCase {
         XCTAssertEqual(snapshot?.requests.isEmpty, true)
         XCTAssertEqual(snapshot?.queued, 3)
         XCTAssertEqual(snapshot?.badgePhase, .queued)
+    }
+
+    func testTokenCountsStayExactUntilTenThousand() {
+        let locale = Locale(identifier: "en_US")
+
+        XCTAssertEqual(ActivityFormat.tokens(999, locale: locale), "999")
+        XCTAssertEqual(ActivityFormat.tokens(1_000, locale: locale), "1,000")
+        XCTAssertEqual(ActivityFormat.tokens(9_999, locale: locale), "9,999")
+        XCTAssertEqual(ActivityFormat.tokens(10_000, locale: locale), "10k")
+        XCTAssertEqual(ActivityFormat.tokens(12_400, locale: locale), "12.4k")
+        XCTAssertEqual(ActivityFormat.tokens(124_000, locale: locale), "124k")
+        XCTAssertEqual(ActivityFormat.tokens(1_200_000, locale: locale), "1.2M")
     }
 
     // MARK: - Linger
