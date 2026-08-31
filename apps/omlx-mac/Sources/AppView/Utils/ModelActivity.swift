@@ -151,15 +151,17 @@ enum ActivityFormat {
     }
 
     static func left(_ seconds: Double) -> String {
-        String(localized: "activity.eta",
-               defaultValue: "\(duration(seconds)) left",
-               comment: "Time remaining on a running prefill; placeholder is a duration")
+        let format = String(localized: "activity.eta",
+                            defaultValue: "%@ left",
+                            comment: "Time remaining on a running prefill; placeholder is a duration")
+        return String(format: format, locale: .current, duration(seconds))
     }
 
     static func queuedDetail(count: Int) -> String {
-        String(localized: "activity.queued_detail",
-               defaultValue: "\(count) waiting",
-               comment: "Row for requests queued but not started; placeholder is the queue depth")
+        let format = String(localized: "activity.queued_detail",
+                            defaultValue: "%lld waiting",
+                            comment: "Row for requests queued but not started; placeholder is the queue depth")
+        return String(format: format, locale: .current, Int64(count))
     }
 
     static func badge(for phase: ModelActivitySnapshot.BadgePhase) -> String {

@@ -139,6 +139,16 @@ final class ModelActivityTests: XCTestCase {
         XCTAssertEqual(ActivityFormat.tokens(1_200_000, locale: locale), "1.2M")
     }
 
+    func testLocalizedActivityDetailsFormatArguments() {
+        let eta = ActivityFormat.left(4.2)
+        let queued = ActivityFormat.queuedDetail(count: 3)
+
+        XCTAssertTrue(eta.contains(ActivityFormat.duration(4.2)), eta)
+        XCTAssertFalse(eta.contains("%@"), eta)
+        XCTAssertTrue(queued.contains("3"), queued)
+        XCTAssertFalse(queued.contains("%lld"), queued)
+    }
+
     // MARK: - Linger
 
     func testFinishedRowIsHeldThenRetired() {
