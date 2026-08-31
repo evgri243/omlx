@@ -138,7 +138,7 @@ enum ActivityFormat {
 
     /// Decode rates sit in the tens, prefill rates in the thousands.
     static func rate(_ tokensPerSecond: Double) -> String {
-        if tokensPerSecond >= 1_000 { return String(format: "%.1fk", tokensPerSecond / 1_000) }
+        if tokensPerSecond >= 10_000 { return String(format: "%.1fk", tokensPerSecond / 1_000) }
         if tokensPerSecond >= 100 { return String(format: "%.0f", tokensPerSecond) }
         return String(format: "%.1f", tokensPerSecond)
     }
@@ -240,46 +240,6 @@ struct ActivityLinger {
     }
 }
 
-// MARK: - Speed smoothing
-
-/// The prefill tracker reports the last chunk's rate, which swings hard
-/// between polls and drags `eta` with it. Average the rate and re-derive the
-/// ETA from it so the two agree on screen.
-struct PrefillSpeedSmoother {
-    private var speeds: [String: Double] = [:]
-    private let alpha: Double
-
-    init(alpha: Double = 0.35) {
-        self.alpha = alpha
-    }
-
-    mutating func smoothed(
-        _ entries: [StatsDTO.PrefillProgressDTO]
-    ) -> [StatsDTO.PrefillProgressDTO] {
-        entries.map { entry in
-            guard let id = entry.requestId, let raw = entry.speed, raw > 0 else { return entry }
-            let averaged = speeds[id].map { $0 + alpha * (raw - $0) } ?? raw
-            speeds[id] = averaged
-            let remaining = max(0, (entry.total ?? 0) - (entry.processed ?? 0))
-            return StatsDTO.PrefillProgressDTO(
-                requestId: id, processed: entry.processed, total: entry.total,
-                speed: averaged, eta: Double(remaining) / averaged,
-                elapsed: entry.elapsed, detail: entry.detail
-            )
-        }
-    }
-
-    /// One smoother serves every model, so pruning happens once per poll
-    /// against the union — per model it would evict the others.
-    mutating func retain(ids: Set<String>) {
-        speeds = speeds.filter { ids.contains($0.key) }
-    }
-
-    mutating func reset() {
-        speeds.removeAll()
-    }
-}
-
 // MARK: - Poller
 
 @MainActor
@@ -289,7 +249,6 @@ final class ModelActivityPoller {
 
     @ObservationIgnored private weak var client: OMLXClient?
     @ObservationIgnored private var pollTask: Task<Void, Never>?
-    @ObservationIgnored private var smoother = PrefillSpeedSmoother()
     @ObservationIgnored private var linger = ActivityLinger()
     @ObservationIgnored private var failures = 0
 
@@ -317,7 +276,6 @@ final class ModelActivityPoller {
         pollTask?.cancel()
         pollTask = nil
         snapshots = [:]
-        smoother.reset()
         linger.reset()
         failures = 0
     }
@@ -330,7 +288,6 @@ final class ModelActivityPoller {
             failures += 1
             if failures >= failuresBeforeClearing, !snapshots.isEmpty {
                 snapshots = [:]
-                smoother.reset()
                 linger.reset()
             }
             return
@@ -338,20 +295,13 @@ final class ModelActivityPoller {
         failures = 0
 
         let models = activity.activeModels.models
-        smoother.retain(ids: Set(
-            models.flatMap { ($0.prefilling ?? []).compactMap(\.requestId) }
-        ))
         linger.retain(models: Set(models.map(\.id)))
 
         // Monotonic, so a wall-clock jump cannot retire rows early.
         let now = ProcessInfo.processInfo.systemUptime
         var next: [String: ModelActivitySnapshot] = [:]
         for model in models {
-            let rows = ModelActivitySnapshot.rows(
-                prefilling: smoother.smoothed(model.prefilling ?? []),
-                generating: model.generating ?? [],
-                activities: model.activities ?? []
-            )
+            let rows = ModelActivitySnapshot.rows(for: model)
             next[model.id] = ModelActivitySnapshot(
                 requests: linger.merge(live: rows, for: model.id, now: now),
                 queued: model.waitingRequests ?? 0

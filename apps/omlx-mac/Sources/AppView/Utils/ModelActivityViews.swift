@@ -56,12 +56,18 @@ private struct ModelActivityRow: View {
                 .frame(width: 60, alignment: .leading)
 
             if let fraction = request.fraction, request.isLive {
-                ProgressBar(progress: fraction, tint: tint)
-                    .frame(width: 70)
-                Text(request.percentText ?? "")
-                    .font(.omlxMono(10.5))
-                    .foregroundStyle(tint)
-                    .frame(width: 32, alignment: .trailing)
+                HStack(spacing: 6) {
+                    Text(ActivityFormat.badge(for: .prefill))
+                        .font(.omlxMono(10.5))
+                        .foregroundStyle(tint)
+                        .lineLimit(1)
+                    ProgressBar(progress: fraction, tint: tint)
+                        .frame(width: 70)
+                    Text(request.percentText ?? "")
+                        .font(.omlxMono(10.5))
+                        .foregroundStyle(tint)
+                        .frame(width: 32, alignment: .trailing)
+                }
             } else {
                 HStack(spacing: 6) {
                     Circle().fill(tint).frame(width: 5, height: 5)

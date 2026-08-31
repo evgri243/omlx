@@ -85,6 +85,7 @@ final class ModelActivityTests: XCTestCase {
 
         XCTAssertEqual(snapshot.requests.count, 2)
         XCTAssertEqual(snapshot.badgePhase, .prefill)
+        XCTAssertEqual(snapshot.badge, ActivityFormat.badge(for: .prefill))
         XCTAssertEqual(try XCTUnwrap(snapshot.requests[0].fraction), 0.62, accuracy: 0.001)
         XCTAssertEqual(snapshot.requests[0].percentText, "62%")
         XCTAssertEqual(snapshot.requests[1].percentText, "18%")
@@ -115,6 +116,33 @@ final class ModelActivityTests: XCTestCase {
         XCTAssertNil(snapshot?.requests.first?.fraction)
     }
 
+    func testPrefillUsesPayloadRawSpeedAndETA() throws {
+        let snapshot = try XCTUnwrap(ModelActivitySnapshot(model: makeModel(
+            prefilling: [.init(requestId: "a", processed: 5_000, total: 20_000,
+                               speed: 1_100, eta: 17.4, elapsed: 1, detail: nil)]
+        )))
+        let detail = try XCTUnwrap(snapshot.requests.first?.detail)
+
+        XCTAssertTrue(detail.contains("1100 tok/s"), detail)
+        XCTAssertTrue(detail.contains(ActivityFormat.left(17.4)), detail)
+    }
+
+    func testGeneratingUsesNumericAndCompactRateBoundaries() throws {
+        let snapshot = try XCTUnwrap(ModelActivitySnapshot(model: makeModel(
+            generating: [
+                .init(requestId: "a", generatedTokens: 1, tokensPerSecond: 9_999,
+                      elapsedSeconds: nil),
+                .init(requestId: "b", generatedTokens: 1, tokensPerSecond: 10_000,
+                      elapsedSeconds: nil),
+            ]
+        )))
+
+        XCTAssertTrue(snapshot.requests[0].detail.contains("9999 tok/s"),
+                      snapshot.requests[0].detail)
+        XCTAssertTrue(snapshot.requests[1].detail.contains("10.0k tok/s"),
+                      snapshot.requests[1].detail)
+    }
+
     func testIdleModelHasNoSnapshot() {
         XCTAssertNil(ModelActivitySnapshot(model: makeModel()))
     }
@@ -137,6 +165,13 @@ final class ModelActivityTests: XCTestCase {
         XCTAssertEqual(ActivityFormat.tokens(12_400, locale: locale), "12.4k")
         XCTAssertEqual(ActivityFormat.tokens(124_000, locale: locale), "124k")
         XCTAssertEqual(ActivityFormat.tokens(1_200_000, locale: locale), "1.2M")
+    }
+
+    func testRatesStayNumericUntilTenThousand() {
+        XCTAssertEqual(ActivityFormat.rate(999.6), "1000")
+        XCTAssertEqual(ActivityFormat.rate(1_100), "1100")
+        XCTAssertEqual(ActivityFormat.rate(9_999), "9999")
+        XCTAssertEqual(ActivityFormat.rate(10_000), "10.0k")
     }
 
     func testLocalizedActivityDetailsFormatArguments() {
@@ -202,50 +237,4 @@ final class ModelActivityTests: XCTestCase {
         XCTAssertEqual(snapshot.badgePhase, .queued)
     }
 
-    // MARK: - Speed smoothing
-
-    func testSmoothedSpeedDampensSwingsAndDrivesEta() throws {
-        var smoother = PrefillSpeedSmoother(alpha: 0.35)
-        func entry(speed: Double) -> StatsDTO.PrefillProgressDTO {
-            .init(requestId: "a", processed: 5_000, total: 20_000,
-                  speed: speed, eta: 999, elapsed: 1, detail: nil)
-        }
-
-        XCTAssertEqual(smoother.smoothed([entry(speed: 2_000)]).first?.speed, 2_000)
-
-        let dipped = try XCTUnwrap(smoother.smoothed([entry(speed: 1_000)]).first)
-        let speed = try XCTUnwrap(dipped.speed)
-        XCTAssertLessThan(speed, 2_000)
-        XCTAssertGreaterThan(speed, 1_000)
-        XCTAssertEqual(try XCTUnwrap(dipped.eta), 15_000 / speed, accuracy: 0.001)
-    }
-
-    func testSmootherRetainsOtherModelsAverages() throws {
-        var smoother = PrefillSpeedSmoother(alpha: 0.35)
-        func entry(_ id: String, speed: Double) -> StatsDTO.PrefillProgressDTO {
-            .init(requestId: id, processed: 10_000, total: 20_000,
-                  speed: speed, eta: nil, elapsed: 1, detail: nil)
-        }
-        _ = smoother.smoothed([entry("a", speed: 2_000)])
-        _ = smoother.smoothed([entry("b", speed: 400)])
-        smoother.retain(ids: ["a", "b"])
-
-        XCTAssertGreaterThan(
-            try XCTUnwrap(smoother.smoothed([entry("a", speed: 1_000)]).first?.speed), 1_000
-        )
-    }
-
-    func testSmootherForgetsFinishedRequests() throws {
-        var smoother = PrefillSpeedSmoother(alpha: 0.35)
-        let finished = StatsDTO.PrefillProgressDTO(
-            requestId: "a", processed: 10, total: 100, speed: 5_000,
-            eta: nil, elapsed: 1, detail: nil)
-        _ = smoother.smoothed([finished])
-        smoother.retain(ids: [])
-
-        let fresh = StatsDTO.PrefillProgressDTO(
-            requestId: "a", processed: 10, total: 100, speed: 50,
-            eta: nil, elapsed: 1, detail: nil)
-        XCTAssertEqual(try XCTUnwrap(smoother.smoothed([fresh]).first?.speed), 50)
-    }
 }
