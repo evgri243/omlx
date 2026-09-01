@@ -1668,3 +1668,146 @@ def test_qwen4_lightning_mtp_isolated_from_dense_qwen35_runtime_patch():
 
     assert resident_owner.mtp is not None
     assert later_owner.mtp is not None
+
+
+def _write_fp8_ple_shard(model_path, key, rows, dims):
+    """Emit a one-shard safetensors file holding a dense F8_E4M3 PLE table."""
+
+    payload = bytes((index * 7 + 3) % 256 for index in range(rows * dims))
+    header = json.dumps(
+        {
+            key: {
+                "dtype": "F8_E4M3",
+                "shape": [rows, dims],
+                "data_offsets": [0, len(payload)],
+            }
+        }
+    ).encode()
+    shard = model_path / "model-00001.safetensors"
+    shard.write_bytes(
+        len(header).to_bytes(8, "little") + header + payload
+    )
+    (model_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {key: shard.name}})
+    )
+
+
+def test_qwen4_ssd_ple_gathers_fp8_shards(tmp_path, monkeypatch):
+    compat.apply_mlx_vlm_qwen4_exp_compat_patch()
+    import mlx_vlm.models.qwen4_exp.language as language
+
+    rows, dims = 8, 4
+    _write_fp8_ple_shard(tmp_path, "ple.shard_0.weight", rows, dims)
+    indices = mx.array([0, 3, 5, 3], dtype=mx.int32)
+
+    def gather():
+        embedding = language.DiskBackedShardedEmbedding(
+            tmp_path, "ple", rows, dims, 1
+        )
+        try:
+            return embedding(indices)
+        finally:
+            embedding.close()
+
+    monkeypatch.delenv("OMLX_QWEN4_PLE_GATHER", raising=False)
+    batched = gather()
+    monkeypatch.setenv("OMLX_QWEN4_PLE_GATHER", "0")
+    upstream = gather()
+    mx.eval(batched, upstream)
+
+    assert batched.shape == (4, dims)
+    assert mx.array_equal(batched, upstream).item()
+
+
+def test_qwen4_ssd_ple_batched_gather_handles_empty_indices(tmp_path):
+    compat.apply_mlx_vlm_qwen4_exp_compat_patch()
+    import mlx_vlm.models.qwen4_exp.language as language
+
+    rows, dims = 8, 4
+    _write_fp8_ple_shard(tmp_path, "ple.shard_0.weight", rows, dims)
+    embedding = language.DiskBackedShardedEmbedding(
+        tmp_path, "ple", rows, dims, 1
+    )
+    try:
+        values = embedding(mx.array([], dtype=mx.int32).reshape(0, 4))
+        assert values.shape == (0, 4, dims)
+    finally:
+        embedding.close()
+
+
+def test_qwen4_ssd_ple_falls_back_for_mixed_shard_dtypes(tmp_path):
+    compat.apply_mlx_vlm_qwen4_exp_compat_patch()
+    import mlx_vlm.models.qwen4_exp.language as language
+
+    tensors = {
+        "ple.shard_0.weight": mx.arange(8, dtype=mx.float16).reshape(2, 4),
+        "ple.shard_1.weight": mx.arange(8, 16, dtype=mx.float32).reshape(2, 4),
+    }
+    filename = "model.safetensors"
+    mx.save_safetensors(str(tmp_path / filename), tensors)
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {key: filename for key in tensors}}),
+        encoding="utf-8",
+    )
+    embedding = language.DiskBackedShardedEmbedding(tmp_path, "ple", 4, 4, 2)
+    try:
+        assert embedding._batched_gather_compatible is False
+        values = embedding(mx.array([0, 2], dtype=mx.int32))
+        expected = mx.stack(
+            [tensors["ple.shard_0.weight"][0], tensors["ple.shard_1.weight"][0]]
+        ).astype(mx.bfloat16)
+        assert mx.array_equal(values, expected).item()
+    finally:
+        embedding.close()
+
+
+def test_qwen4_ssd_ple_batches_cold_pages_across_shards(
+    tmp_path, monkeypatch
+):
+    compat.apply_mlx_vlm_qwen4_exp_compat_patch()
+    import mlx_vlm.models.qwen4_exp.language as language
+
+    prefix = "ple"
+    shard_count, rows_per_shard, dims = 16, 2, 83
+    tensors = {
+        f"{prefix}.shard_{shard}.weight": (
+            mx.arange(rows_per_shard * dims, dtype=mx.float32)
+            .reshape(rows_per_shard, dims)
+            .astype(mx.bfloat16)
+            + shard
+        )
+        for shard in range(shard_count)
+    }
+    filename = "model.safetensors"
+    mx.save_safetensors(str(tmp_path / filename), tensors)
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {key: filename for key in tensors}}),
+        encoding="utf-8",
+    )
+    embedding = language.DiskBackedShardedEmbedding(
+        tmp_path,
+        prefix,
+        shard_count * rows_per_shard,
+        dims,
+        shard_count,
+    )
+    try:
+        pread = MagicMock(wraps=language.os.pread)
+        monkeypatch.setattr(language.os, "pread", pread)
+        indices = mx.arange(0, shard_count * rows_per_shard, rows_per_shard)
+        expected = mx.stack(
+            [tensors[f"{prefix}.shard_{shard}.weight"][0] for shard in range(shard_count)]
+        )
+
+        cold = embedding(indices)
+        mx.eval(cold)
+        assert mx.array_equal(cold, expected).item()
+        assert pread.call_count > 0
+
+        pread.reset_mock()
+        warm = embedding(indices)
+        mx.eval(warm)
+        assert mx.array_equal(warm, expected).item()
+        pread.assert_not_called()
+    finally:
+        embedding.close()

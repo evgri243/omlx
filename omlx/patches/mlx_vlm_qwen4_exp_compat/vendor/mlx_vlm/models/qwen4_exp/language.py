@@ -1843,6 +1843,13 @@ def _find_nth_prime_after(start: int, count: int) -> int:
 # os.pread releases the GIL and does not change the shared file position.
 _PLE_IO_POOL = ThreadPoolExecutor(max_workers=48, thread_name_prefix="ple-io")
 _PLE_PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
+_PLE_DTYPE_INFO = {
+    "BF16": (np.dtype("<u2"), 2),
+    "F16": (np.dtype("<f2"), 2),
+    "F32": (np.dtype("<f4"), 4),
+    "U32": (np.dtype("<u4"), 4),
+    "F8_E4M3": (np.dtype("u1"), 1),
+}
 # Slow gathers may indicate page eviction. Allow normal gather overhead and
 # rate-limit retries; elapsed time is a heuristic, not a residency check.
 _PLE_REARM_FLOOR_SECONDS = 0.0005
@@ -1877,17 +1884,15 @@ class _SafeTensorMMap:
         return str(self._header[key]["dtype"])
 
     def rows(self, key: str, rows: list[int]) -> mx.array:
+        copied, dtype = self._copy_rows(key, rows)
+        return self._rows_to_mx(copied, dtype)
+
+    def _copy_rows(self, key: str, rows) -> tuple[np.ndarray, str]:
         entry = self._header[key]
         shape = tuple(entry["shape"])
         start, end = entry["data_offsets"]
-        dtype = entry["dtype"]
-        dtype_info = {
-            "BF16": (np.dtype("<u2"), 2),
-            "F16": (np.dtype("<f2"), 2),
-            "F32": (np.dtype("<f4"), 4),
-            "U32": (np.dtype("<u4"), 4),
-            "F8_E4M3": (np.dtype("u1"), 1),
-        }.get(dtype)
+        dtype = str(entry["dtype"])
+        dtype_info = _PLE_DTYPE_INFO.get(dtype)
         if dtype_info is None:
             raise TypeError(f"SSD-backed Qwen4 PLE does not support {dtype}")
         np_dtype, item_size = dtype_info
@@ -1895,33 +1900,48 @@ class _SafeTensorMMap:
             raise ValueError(f"Invalid sparse PLE tensor layout for {key}")
         row_indices = np.asarray(rows, dtype=np.intp)
         if row_indices.size == 0:
-            copied = np.empty((0, shape[1]), dtype=np_dtype)
-        else:
-            gather_start = None
-            if row_indices.size > 8:
-                fully_seen = self._prefetch_missing_pages(
-                    row_indices,
-                    self._data_start + start,
-                    shape[1] * item_size,
-                )
-                gather_start = time.perf_counter() if fully_seen else None
-            view = np.ndarray(
-                shape,
-                dtype=np_dtype,
-                buffer=self._mapping,
-                offset=self._data_start + start,
+            return np.empty((0, shape[1]), dtype=np_dtype), dtype
+
+        gather_start = None
+        if row_indices.size > 8:
+            fully_seen = self._prefetch_missing_pages(
+                row_indices,
+                self._data_start + start,
+                shape[1] * item_size,
             )
-            copied = np.array(view[row_indices], copy=True)
-            if gather_start is not None:
-                self._rearm_if_slow(
-                    time.perf_counter() - gather_start, row_indices.size
-                )
+            gather_start = time.perf_counter() if fully_seen else None
+        view = np.ndarray(
+            shape,
+            dtype=np_dtype,
+            buffer=self._mapping,
+            offset=self._data_start + start,
+        )
+        copied = np.array(view[row_indices], copy=True)
+        if gather_start is not None:
+            self._rearm_if_slow(time.perf_counter() - gather_start, row_indices.size)
+        return copied, dtype
+
+    @staticmethod
+    def _rows_to_mx(copied: np.ndarray, dtype: str) -> mx.array:
         if dtype == "BF16":
             values = (copied.astype(np.uint32) << np.uint32(16)).view(np.float32)
             return mx.array(values).astype(mx.bfloat16)
         if dtype == "F8_E4M3":
             return mx.from_fp8(mx.array(copied), dtype=mx.bfloat16)
         return mx.array(copied)
+
+    def _touch_page(self, page: int) -> None:
+        offset = int(page) * _PLE_PAGE_SIZE
+        remaining = _PLE_PAGE_SIZE
+        while remaining > 0:
+            chunk = os.pread(
+                self._file.fileno(),
+                remaining,
+                offset + (_PLE_PAGE_SIZE - remaining),
+            )
+            if not chunk:
+                break
+            remaining -= len(chunk)
 
     def _prefetch_missing_pages(self, row_indices, base_offset, row_bytes) -> bool:
         """Prefetch unmarked pages; return whether all were already marked."""
@@ -1935,19 +1955,9 @@ class _SafeTensorMMap:
         fresh = needed_pages[seen[needed_pages] == 0]
         if fresh.size == 0:
             return True
-        fd = self._file.fileno()
-
-        def touch(page: int) -> None:
-            offset = int(page) * _PLE_PAGE_SIZE
-            remaining = _PLE_PAGE_SIZE
-            while remaining > 0:
-                chunk = os.pread(fd, remaining, offset + (_PLE_PAGE_SIZE - remaining))
-                if not chunk:
-                    break
-                remaining -= len(chunk)
-
-        list(_PLE_IO_POOL.map(touch, (int(page) for page in fresh.tolist())))
-        for page in fresh.tolist():
+        pages = [int(page) for page in fresh.tolist()]
+        list(_PLE_IO_POOL.map(self._touch_page, pages))
+        for page in pages:
             self._seen_pages[page] = 1
         return False
 
@@ -1979,6 +1989,17 @@ class _SafeTensorMMap:
         if self._file is not None:
             self._file.close()
             self._file = None
+
+
+def _touch_ple_page(request: tuple[_SafeTensorMMap, int]) -> None:
+    reader, page = request
+    reader._touch_page(page)
+
+
+def _ple_batched_gather() -> bool:
+    return os.environ.get("OMLX_QWEN4_PLE_GATHER", "").strip().lower() not in (
+        "0", "false", "no", "off"
+    )
 
 
 class DiskBackedShardedEmbedding(nn.Module):
@@ -2134,7 +2155,151 @@ class DiskBackedShardedEmbedding(nn.Module):
                 group_size,
             )
 
+        signatures = []
+        for shard_index in range(len(self.shard_sizes)):
+            weight_key, scales_key, biases_key, bits, group_size = self._shard_specs[
+                shard_index
+            ]
+            signatures.append(
+                (
+                    bits,
+                    group_size,
+                    self._tensor_readers[weight_key].tensor_dtype(weight_key),
+                    None
+                    if scales_key is None
+                    else self._tensor_readers[scales_key].tensor_dtype(scales_key),
+                    None
+                    if biases_key is None
+                    else self._tensor_readers[biases_key].tensor_dtype(biases_key),
+                )
+            )
+        self._batched_gather_compatible = all(
+            signature == signatures[0] for signature in signatures[1:]
+        )
+
+    # ---- batched sharded gather ---------------------------------------------
+    # Decode IDs scatter across many shards, leaving each shard below the
+    # reader's prefetch threshold. Collect unseen pages across all shards in
+    # one pool dispatch, retain mmap copies for warm pages, and dequantize once.
+    # OMLX_QWEN4_PLE_GATHER=0 restores the per-shard path.
+    def _prefetch_batched_rows(self, shard_ids, local_ids, bounds) -> None:
+        pages_by_reader: dict[_SafeTensorMMap, set[int]] = {}
+        for shard_id in np.unique(shard_ids):
+            lo, hi = bounds[shard_id], bounds[shard_id + 1]
+            rows = local_ids[lo:hi]
+            weight_key, scales_key, biases_key, _, _ = self._shard_specs[
+                int(shard_id)
+            ]
+            for key in (weight_key, scales_key, biases_key):
+                if key is None:
+                    continue
+                reader = self._tensor_readers[key]
+                entry = reader._header[key]
+                shape = tuple(entry["shape"])
+                _, item_size = _PLE_DTYPE_INFO[str(entry["dtype"])]
+                row_bytes = shape[1] * item_size
+                base_offset = reader._data_start + entry["data_offsets"][0]
+                fresh = pages_by_reader.setdefault(reader, set())
+                for row in rows:
+                    start = base_offset + int(row) * row_bytes
+                    first_page = start // _PLE_PAGE_SIZE
+                    last_page = (start + row_bytes - 1) // _PLE_PAGE_SIZE
+                    for page in range(first_page, last_page + 1):
+                        if not reader._seen_pages[page]:
+                            fresh.add(page)
+
+        requests = [
+            (reader, page)
+            for reader, pages in pages_by_reader.items()
+            for page in pages
+        ]
+        if not requests:
+            return
+        list(_PLE_IO_POOL.map(_touch_ple_page, requests))
+        for reader, pages in pages_by_reader.items():
+            for page in pages:
+                reader._seen_pages[page] = 1
+
+    @staticmethod
+    def _join_raw_rows(parts: list[np.ndarray]) -> np.ndarray:
+        return parts[0] if len(parts) == 1 else np.concatenate(parts, axis=0)
+
+    def _gather_host(self, host: np.ndarray, shape: tuple[int, ...]) -> mx.array:
+        offsets = np.asarray(self.shard_offsets, dtype=np.int64)
+        if host.size == 0:
+            self.last_touched_shards = ()
+            self.rows_read = 0
+            return mx.zeros((*shape, self.dims), dtype=mx.bfloat16)
+        if host.min() < 0 or host.max() >= offsets[-1]:
+            raise IndexError("embedding index is outside the sharded vocabulary")
+
+        unique_ids, inverse = np.unique(host, return_inverse=True)
+        shard_ids = np.searchsorted(offsets, unique_ids, side="right") - 1
+        local_ids = unique_ids - offsets[shard_ids]
+        bounds = np.searchsorted(
+            shard_ids, np.arange(len(self.shard_sizes) + 1)
+        )
+        touched = np.unique(shard_ids)
+        if unique_ids.size > 8:
+            self._prefetch_batched_rows(shard_ids, local_ids, bounds)
+
+        raw_parts: list[list[np.ndarray]] = [[], [], []]
+        dtypes: list[str | None] = [None, None, None]
+        for shard_id in touched:
+            lo, hi = bounds[shard_id], bounds[shard_id + 1]
+            rows = local_ids[lo:hi]
+            weight_key, scales_key, biases_key, _, _ = self._shard_specs[
+                int(shard_id)
+            ]
+            for index, key in enumerate((weight_key, scales_key, biases_key)):
+                if key is None:
+                    continue
+                copied, dtype = self._tensor_readers[key]._copy_rows(key, rows)
+                raw_parts[index].append(copied)
+                dtypes[index] = dtype
+
+        weight_dtype = dtypes[0]
+        assert weight_dtype is not None
+        weight = _SafeTensorMMap._rows_to_mx(
+            self._join_raw_rows(raw_parts[0]), weight_dtype
+        )
+        _, _, _, bits, group_size = self._shard_specs[int(touched[0])]
+        if bits is not None:
+            scales_dtype, biases_dtype = dtypes[1], dtypes[2]
+            assert group_size is not None
+            assert scales_dtype is not None
+            assert biases_dtype is not None
+            scales = _SafeTensorMMap._rows_to_mx(
+                self._join_raw_rows(raw_parts[1]), scales_dtype
+            )
+            biases = _SafeTensorMMap._rows_to_mx(
+                self._join_raw_rows(raw_parts[2]), biases_dtype
+            )
+            values = mx.dequantize(
+                weight,
+                scales,
+                biases,
+                group_size=group_size,
+                bits=bits,
+                mode="affine",
+            )
+        else:
+            values = weight
+        values = values.astype(mx.bfloat16) * self.weight_scale
+        self.last_touched_shards = tuple(int(shard_id) for shard_id in touched)
+        self.rows_read = int(unique_ids.size)
+        out = values[mx.array(inverse.astype(np.int32))]
+        return out.reshape(*shape, self.dims)
+
+    def _call_batched(self, indices: mx.array) -> mx.array:
+        shape = indices.shape
+        flat = indices.reshape(-1)
+        mx.eval(flat)
+        return self._gather_host(np.asarray(flat, dtype=np.int64), shape)
+
     def __call__(self, indices: mx.array) -> mx.array:
+        if _ple_batched_gather() and self._batched_gather_compatible:
+            return self._call_batched(indices)
         shape = indices.shape
         flat = indices.reshape(-1)
         mx.eval(flat)
