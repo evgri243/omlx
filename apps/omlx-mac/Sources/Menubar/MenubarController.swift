@@ -817,14 +817,13 @@ final class MenubarController: NSObject {
         let tickOK = statsPoller?.lastTickWasSuccess ?? false
         metricsStore.applyTick(
             live: tickOK
-                ? MenubarMetricsStore.liveRates(from: statsPoller?.liveStats)
+                ? MenubarMetricsStore.snapshot(for: .live, from: statsPoller?.liveStats)
                 : nil,
-            liveActivity: tickOK ? statsPoller?.liveStats?.liveActivity : nil,
             average: tickOK
-                ? MenubarMetricsStore.averageRates(from: statsPoller?.sessionStats)
+                ? MenubarMetricsStore.snapshot(for: .average, from: statsPoller?.sessionStats)
                 : nil,
             alltime: tickOK
-                ? MenubarMetricsStore.averageRates(from: statsPoller?.alltimeStats)
+                ? MenubarMetricsStore.snapshot(for: .alltime, from: statsPoller?.alltimeStats)
                 : nil,
             serverRunning: serverIsRunning && tickOK
         )

@@ -1091,6 +1091,30 @@
         }
       }
     },
+    "menubar.metric.metrics" : {
+      "comment" : "Header above scalar counters in an AVG or ALL serving metric popover",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Serving Stats"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Статистика обслуживания"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "服务统计"
+          }
+        }
+      }
+    },
     "menubar.metric.server_off" : {
       "comment" : "Note in a menubar metric popover while the server is not running",
       "extractionState" : "manual",
@@ -1111,6 +1135,30 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "服务器已关闭"
+          }
+        }
+      }
+    },
+    "menubar.metric.unavailable" : {
+      "comment" : "Note in an AVG or ALL popover when its scoped stats are unavailable",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Serving stats are unavailable"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Статистика обслуживания недоступна"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "服务统计不可用"
           }
         }
       }
