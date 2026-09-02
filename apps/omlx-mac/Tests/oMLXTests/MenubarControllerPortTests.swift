@@ -246,9 +246,66 @@ final class MenubarControllerPortTests: XCTestCase {
 
         let stats = try JSONDecoder().decode(MenubarStatsPoller.Stats.self, from: data)
         let activity = try XCTUnwrap(stats.liveActivity)
+        let request = try XCTUnwrap(activity.groups.first?.requests.first)
 
-        XCTAssertEqual(activity.menuBarTitle, "PP 38% · 12k/32k")
-        XCTAssertEqual(activity.detail, "Laguna XS.2 · 321 tok/s · 47s left")
+        XCTAssertEqual(request.title, "38% · 12k / 32k tk")
+        XCTAssertFalse(request.title.contains("PP"))
+        XCTAssertEqual(activity.detail, "Laguna XS.2 · 321 tk/s")
+        XCTAssertEqual(request.kind, .prefill)
+    }
+
+    func testLiveActivityGroupsRequestsAndCapsTheVisibleRows() throws {
+        let data = try XCTUnwrap(
+            """
+            {
+              "active_models": {
+                "models": [
+                  {
+                    "id": "model-a",
+                    "generating": [
+                      {"generated_tokens": 1, "tokens_per_second": 1},
+                      {"generated_tokens": 2, "tokens_per_second": 2},
+                      {"generated_tokens": 3, "tokens_per_second": 3},
+                      {"generated_tokens": 4, "tokens_per_second": 4}
+                    ]
+                  },
+                  {
+                    "id": "model-b",
+                    "generating": [
+                      {"generated_tokens": 5, "tokens_per_second": 5},
+                      {"generated_tokens": 6, "tokens_per_second": 6},
+                      {"generated_tokens": 7, "tokens_per_second": 7},
+                      {"generated_tokens": 8, "tokens_per_second": 8}
+                    ]
+                  }
+                ],
+                "total_waiting_requests": 3
+              }
+            }
+            """.data(using: .utf8)
+        )
+
+        let stats = try JSONDecoder().decode(MenubarStatsPoller.Stats.self, from: data)
+        let activity = try XCTUnwrap(stats.liveActivity)
+
+        XCTAssertEqual(activity.groups.map(\.modelID), ["model-a", "model-b"])
+        XCTAssertEqual(activity.groups.map { $0.requests.count }, [4, 2])
+        XCTAssertEqual(activity.hiddenRequestCount, 2)
+        XCTAssertEqual(activity.queuedRequestCount, 3)
+        XCTAssertFalse(activity.isIdle)
+    }
+
+    func testLiveActivityRepresentsAnIdleActivityPayload() throws {
+        let data = try XCTUnwrap(
+            #"{"active_models": {"models": [], "total_waiting_requests": 0}}"#
+                .data(using: .utf8)
+        )
+
+        let stats = try JSONDecoder().decode(MenubarStatsPoller.Stats.self, from: data)
+        let activity = try XCTUnwrap(stats.liveActivity)
+
+        XCTAssertTrue(activity.isIdle)
+        XCTAssertEqual(activity.groups, [])
     }
 
     func testLiveActivityShowsGenerationWhenNoPrefillIsActive() throws {
@@ -276,9 +333,97 @@ final class MenubarControllerPortTests: XCTestCase {
 
         let stats = try JSONDecoder().decode(MenubarStatsPoller.Stats.self, from: data)
         let activity = try XCTUnwrap(stats.liveActivity)
+        let request = try XCTUnwrap(activity.groups.first?.requests.first)
 
-        XCTAssertEqual(activity.menuBarTitle, "GEN 42.1 tok/s")
-        XCTAssertEqual(activity.detail, "Laguna XS.2 · 128 tok · 3s")
+        XCTAssertEqual(request.title, "128 tk")
+        XCTAssertFalse(request.title.contains("TG"))
+        XCTAssertEqual(activity.detail, "Laguna XS.2 · 42.1 tk/s")
+        XCTAssertEqual(request.kind, .generating)
+    }
+
+    func testLiveActivityUsesZeroRateWhenProgressRateIsMissing() throws {
+        let data = try XCTUnwrap(
+            """
+            {
+              "active_models": {
+                "models": [
+                  {
+                    "id": "Laguna XS.2",
+                    "prefilling": [{"processed": 66000, "total": 128000}],
+                    "generating": [{"generated_tokens": 1200}]
+                  }
+                ]
+              }
+            }
+            """.data(using: .utf8)
+        )
+
+        let stats = try JSONDecoder().decode(MenubarStatsPoller.Stats.self, from: data)
+        let requests = try XCTUnwrap(stats.liveActivity?.groups.first?.requests)
+
+        XCTAssertEqual(
+            requests.map(\.title),
+            [
+                "52% · \(ActivityFormat.tokens(66_000)) / \(ActivityFormat.tokens(128_000)) tk",
+                "\(ActivityFormat.tokens(1_200)) tk"
+            ]
+        )
+        XCTAssertEqual(requests.map(\.detail), ["0.0 tk/s", "0.0 tk/s"])
+    }
+
+    func testLiveActivityUsesSharedTokenFormattingForPrefillAndGeneration() throws {
+        let data = try XCTUnwrap(
+            """
+            {
+              "active_models": {
+                "models": [
+                  {
+                    "id": "Laguna XS.2",
+                    "prefilling": [{"processed": 1100, "total": 9999}],
+                    "generating": [{"generated_tokens": 10000}]
+                  }
+                ]
+              }
+            }
+            """.data(using: .utf8)
+        )
+
+        let stats = try JSONDecoder().decode(MenubarStatsPoller.Stats.self, from: data)
+        let requests = try XCTUnwrap(stats.liveActivity?.groups.first?.requests)
+
+        XCTAssertEqual(
+            requests.map(\.title),
+            [
+                "11% · \(ActivityFormat.tokens(1_100)) / \(ActivityFormat.tokens(9_999)) tk",
+                "\(ActivityFormat.tokens(10_000)) tk"
+            ]
+        )
+    }
+
+    func testLiveActivityUsesSharedRateFormattingForPrefillAndGeneration() throws {
+        let data = try XCTUnwrap(
+            """
+            {
+              "active_models": {
+                "models": [
+                  {
+                    "id": "Laguna XS.2",
+                    "prefilling": [{"processed": 1, "total": 2, "speed": 1200.0}],
+                    "generating": [{"generated_tokens": 1, "tokens_per_second": 321.4}]
+                  }
+                ]
+              }
+            }
+            """.data(using: .utf8)
+        )
+
+        let stats = try JSONDecoder().decode(MenubarStatsPoller.Stats.self, from: data)
+        let requests = try XCTUnwrap(stats.liveActivity?.groups.first?.requests)
+
+        XCTAssertEqual(
+            requests.map(\.detail),
+            ["\(ActivityFormat.rate(1200)) tk/s", "\(ActivityFormat.rate(321.4)) tk/s"]
+        )
     }
 
     func testLiveActivityShowsQueuedRequestsWhenNoRequestIsRunning() throws {
@@ -296,7 +441,6 @@ final class MenubarControllerPortTests: XCTestCase {
         let stats = try JSONDecoder().decode(MenubarStatsPoller.Stats.self, from: data)
         let activity = try XCTUnwrap(stats.liveActivity)
 
-        XCTAssertEqual(activity.menuBarTitle, "WAIT 2")
         XCTAssertEqual(activity.detail, "2 queued requests")
     }
 
@@ -324,9 +468,11 @@ final class MenubarControllerPortTests: XCTestCase {
 
         let stats = try JSONDecoder().decode(MenubarStatsPoller.Stats.self, from: data)
         let activity = try XCTUnwrap(stats.liveActivity)
+        let request = try XCTUnwrap(activity.groups.first?.requests.first)
 
-        XCTAssertEqual(activity.menuBarTitle, "RUN 12s")
+        XCTAssertEqual(request.title, "RUN 12s")
         XCTAssertEqual(activity.detail, "embed-model · Embedding · 12s")
+        XCTAssertEqual(request.kind, .nonStreaming)
     }
 
     func testRefreshOnceLoadsLiveActivityFromActivityEndpoint() async {
@@ -342,7 +488,7 @@ final class MenubarControllerPortTests: XCTestCase {
         await poller.refreshOnce()
 
         XCTAssertEqual(poller.sessionStats?.totalPromptTokens, 99)
-        XCTAssertEqual(poller.liveStats?.liveActivity?.menuBarTitle, "GEN 42.1 tok/s")
+        XCTAssertEqual(poller.liveStats?.liveActivity?.groups.first?.requests.first?.title, "128 tk")
         XCTAssertEqual(poller.alltimeStats?.totalRequests, 3)
         XCTAssertEqual(MenubarStatsURLProtocol.recordedActivityRequestCount(), 1)
     }
@@ -391,7 +537,7 @@ final class MenubarControllerPortTests: XCTestCase {
 
         await poller.refreshOnce()
 
-        XCTAssertEqual(poller.liveStats?.liveActivity?.menuBarTitle, "GEN 42.1 tok/s")
+        XCTAssertEqual(poller.liveStats?.liveActivity?.groups.first?.requests.first?.title, "128 tk")
         XCTAssertEqual(MenubarStatsURLProtocol.recordedActivityRequestCount(), 1)
     }
 
@@ -418,7 +564,7 @@ final class MenubarControllerPortTests: XCTestCase {
         XCTAssertEqual(MenubarStatsURLProtocol.recordedUpdateNotificationCount(), 1)
     }
 
-    func testRefreshOnceSkipsLiveAdminStatsWhenActivityDisplayIsDisabled() async {
+    func testRefreshOnceLoadsCurrentRequestsWhenLiveGlyphIsDisabled() async {
         let sessionConfiguration = URLSessionConfiguration.ephemeral
         sessionConfiguration.protocolClasses = [MenubarStatsURLProtocol.self]
         let poller = MenubarStatsPoller(
@@ -431,8 +577,8 @@ final class MenubarControllerPortTests: XCTestCase {
         await poller.refreshOnce()
 
         XCTAssertEqual(poller.sessionStats?.totalPromptTokens, 99)
-        XCTAssertNil(poller.liveStats)
-        XCTAssertEqual(MenubarStatsURLProtocol.recordedActivityRequestCount(), 0)
+        XCTAssertNotNil(poller.liveStats?.liveActivity)
+        XCTAssertEqual(MenubarStatsURLProtocol.recordedActivityRequestCount(), 1)
     }
 
     func testRefreshOnceClearsLiveActivityAfterActivityFailure() async {

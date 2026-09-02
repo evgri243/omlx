@@ -36,17 +36,20 @@ final class MenubarMetricsStore {
     private(set) var rates: [Kind: MetricRates] = [:]
     private(set) var history: [Kind: Series] = [:]
     private(set) var serverIsRunning = false
+    private(set) var liveActivity: MenubarStatsPoller.Stats.LiveActivity?
 
     /// One call per poller tick. Unknown readings surface as nil rates (the
     /// glyph shows "–") but roll a 0 into the history so the graph timeline
     /// stays contiguous.
     func applyTick(
         live: MetricRates?,
+        liveActivity: MenubarStatsPoller.Stats.LiveActivity?,
         average: MetricRates?,
         alltime: MetricRates?,
         serverRunning: Bool
     ) {
         serverIsRunning = serverRunning
+        self.liveActivity = liveActivity
         record(.live, live)
         record(.average, average)
         record(.alltime, alltime)
@@ -57,6 +60,7 @@ final class MenubarMetricsStore {
     func markServerStopped() {
         serverIsRunning = false
         rates = [:]
+        liveActivity = nil
     }
 
     private func record(_ kind: Kind, _ reading: MetricRates?) {
