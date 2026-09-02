@@ -645,16 +645,8 @@ final class MenubarController: NSObject {
             return
         }
 
-        if let liveActivity {
-            statsSubmenu.addItem(disabled(String(
-                localized: "menubar.stats.live_activity",
-                defaultValue: "Live Activity",
-                comment: "Section header inside the Serving Stats submenu for the current active request"
-            )))
-            statsSubmenu.addItem(disabled(liveActivity.menuBarTitle))
-            statsSubmenu.addItem(disabled(liveActivity.detail))
-            statsSubmenu.addItem(.separator())
-        }
+        appendCurrentRequests(liveActivity)
+        statsSubmenu.addItem(.separator())
 
         statsSubmenu.addItem(disabled(String(localized: "menubar.stats.session_section",
                                              defaultValue: "Session",
@@ -827,6 +819,7 @@ final class MenubarController: NSObject {
             live: tickOK
                 ? MenubarMetricsStore.liveRates(from: statsPoller?.liveStats)
                 : nil,
+            liveActivity: tickOK ? statsPoller?.liveStats?.liveActivity : nil,
             average: tickOK
                 ? MenubarMetricsStore.averageRates(from: statsPoller?.sessionStats)
                 : nil,
@@ -1332,6 +1325,52 @@ final class MenubarController: NSObject {
         let it = NSMenuItem(title: "\(label):  \(value)", action: nil, keyEquivalent: "")
         it.isEnabled = false
         statsSubmenu.addItem(it)
+    }
+
+    private func appendCurrentRequests(_ activity: MenubarStatsPoller.Stats.LiveActivity?) {
+        statsSubmenu.addItem(disabled(String(
+            localized: "menubar.stats.current_requests",
+            defaultValue: "Current Requests",
+            comment: "Section header inside Serving Stats for active and queued requests"
+        )))
+
+        guard let activity else {
+            statsSubmenu.addItem(disabled(String(
+                localized: "menubar.stats.loading",
+                defaultValue: "Loading stats…",
+                comment: "Disabled placeholder shown while stats are loading"
+            )))
+            return
+        }
+        guard !activity.isIdle else {
+            statsSubmenu.addItem(disabled(String(
+                localized: "menubar.stats.no_current_requests",
+                defaultValue: "No active requests",
+                comment: "Disabled empty state in Serving Stats when no requests are active or queued"
+            )))
+            return
+        }
+
+        for group in activity.groups {
+            statsSubmenu.addItem(disabled(group.modelID))
+            for request in group.requests {
+                statsSubmenu.addItem(disabled("  \(request.title) · \(request.detail)"))
+            }
+        }
+        if activity.queuedRequestCount > 0 {
+            statsSubmenu.addItem(disabled(String(
+                localized: "menubar.stats.queued_requests",
+                defaultValue: "\(activity.queuedRequestCount) queued requests",
+                comment: "Current Requests row showing how many requests have not started; placeholder is the count"
+            )))
+        }
+        if activity.hiddenRequestCount > 0 {
+            statsSubmenu.addItem(disabled(String(
+                localized: "menubar.stats.more_requests",
+                defaultValue: "\(activity.hiddenRequestCount) more requests",
+                comment: "Current Requests row showing active requests omitted from the capped list; placeholder is the count"
+            )))
+        }
     }
 
     private func compact(_ value: Int?) -> String {

@@ -94,6 +94,7 @@ final class MenubarMetricTests: XCTestCase {
         let store = MenubarMetricsStore()
         store.applyTick(
             live: MetricRates(promptTps: 100, generationTps: 10),
+            liveActivity: nil,
             average: MetricRates(promptTps: 200, generationTps: 20),
             alltime: nil,
             serverRunning: true
@@ -113,6 +114,7 @@ final class MenubarMetricTests: XCTestCase {
         let store = MenubarMetricsStore()
         store.applyTick(
             live: MetricRates(promptTps: 100, generationTps: 10),
+            liveActivity: nil,
             average: MetricRates(promptTps: 200, generationTps: 20),
             alltime: MetricRates(promptTps: 300, generationTps: 30),
             serverRunning: true

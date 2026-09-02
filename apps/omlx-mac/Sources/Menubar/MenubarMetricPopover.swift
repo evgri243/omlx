@@ -51,6 +51,11 @@ struct MetricPopoverView: View {
             graphCaption("TG tk/s")
             MetricSparkline(values: series.generationTps, color: theme.greenDot)
 
+            if kind == .live {
+                Divider().padding(.vertical, 2)
+                CurrentRequestsView(activity: store.liveActivity)
+            }
+
             Divider().padding(.vertical, 2)
 
             HStack(spacing: 8) {
@@ -151,6 +156,93 @@ struct MetricPopoverView: View {
             return String(format: "%.1f tk/s", clamped)
         }
         return "\(Int(clamped.rounded())) tk/s"
+    }
+}
+
+private struct CurrentRequestsView: View {
+    let activity: MenubarStatsPoller.Stats.LiveActivity?
+    @Environment(\.omlxTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(String(
+                localized: "menubar.stats.current_requests",
+                defaultValue: "Current Requests",
+                comment: "Section header inside Serving Stats for active and queued requests"
+            ).uppercased())
+            .font(.omlxText(10, weight: .bold))
+            .kerning(1)
+            .foregroundStyle(theme.accent)
+            .frame(maxWidth: .infinity, alignment: .center)
+
+            if let activity {
+                if activity.isIdle {
+                    emptyState
+                } else {
+                    ForEach(activity.groups) { group in
+                        Text(group.modelID)
+                            .font(.omlxMono(10, weight: .medium))
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(1)
+                        ForEach(group.requests) { request in
+                            requestRow(request)
+                        }
+                    }
+                    if activity.queuedRequestCount > 0 {
+                        statusRow(String(
+                            localized: "menubar.stats.queued_requests",
+                            defaultValue: "\(activity.queuedRequestCount) queued requests",
+                            comment: "Current Requests row showing how many requests have not started; placeholder is the count"
+                        ))
+                    }
+                    if activity.hiddenRequestCount > 0 {
+                        statusRow(String(
+                            localized: "menubar.stats.more_requests",
+                            defaultValue: "\(activity.hiddenRequestCount) more requests",
+                            comment: "Current Requests row showing active requests omitted from the capped list; placeholder is the count"
+                        ))
+                    }
+                }
+            } else {
+                Text(String(
+                    localized: "menubar.stats.loading",
+                    defaultValue: "Loading stats…",
+                    comment: "Disabled placeholder shown while stats are loading"
+                ))
+                .font(.omlxText(11))
+                .foregroundStyle(theme.textTertiary)
+            }
+        }
+    }
+
+    private var emptyState: some View {
+        Text(String(
+            localized: "menubar.stats.no_current_requests",
+            defaultValue: "No active requests",
+            comment: "Disabled empty state in Serving Stats when no requests are active or queued"
+        ))
+        .font(.omlxText(11))
+        .foregroundStyle(theme.textTertiary)
+    }
+
+    private func requestRow(_ request: MenubarStatsPoller.Stats.LiveActivity.Request) -> some View {
+        HStack(spacing: 6) {
+            Text(request.title)
+                .font(.omlxMono(10))
+                .foregroundStyle(theme.text)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Text(request.detail)
+                .font(.omlxMono(10))
+                .foregroundStyle(theme.textTertiary)
+                .lineLimit(1)
+        }
+    }
+
+    private func statusRow(_ text: String) -> some View {
+        Text(text)
+            .font(.omlxText(11))
+            .foregroundStyle(theme.textTertiary)
     }
 }
 
