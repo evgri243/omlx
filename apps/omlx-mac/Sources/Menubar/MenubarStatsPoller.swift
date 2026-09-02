@@ -1,6 +1,6 @@
 // Menubar poller: use lightweight /api/status for liveness, authenticated
 // /admin/api/activity reads for current request activity, and occasional
-// all-time stats reads for the Serving Stats submenu. Emits
+// all-time stats reads only while a consumer needs them. Emits
 // NotificationCenter posts so the menubar refreshes without polling state
 // itself.
 //
@@ -229,6 +229,7 @@ final class MenubarStatsPoller {
     private let idleInterval: TimeInterval
     private let session: URLSession
     private var task: Task<Void, Never>?
+    private var refreshInProgress = false
     /// Seconds between all-time fetches. All-time averages only change when a
     /// request completes and the endpoint is heavyweight (it also builds
     /// active_models/engines/runtime_cache), so it is never polled at the
@@ -238,6 +239,7 @@ final class MenubarStatsPoller {
         enabledMetrics.alltime ? 5 : 30
     }
     private var tickCount = 0
+    private(set) var servingStatsSubmenuOpen = false
     private(set) var enabledMetrics = EnabledMetrics(
         live: false, average: false, alltime: false
     )
@@ -295,7 +297,7 @@ final class MenubarStatsPoller {
             return
         }
 
-        let alltimeTurnedOn = !enabledMetrics.alltime && metrics.alltime
+        let alltimeTurnedOn = !needsAlltimeStats && (metrics.alltime || servingStatsSubmenuOpen)
         enabledMetrics = metrics
         if alltimeTurnedOn {
             // Force an all-time fetch on the next tick so a freshly enabled
@@ -304,12 +306,36 @@ final class MenubarStatsPoller {
         }
     }
 
+    /// The hosted Serving Stats menu is a consumer independent of the optional
+    /// LIV / AVG / ALL status items. Opening it starts the admin-backed scopes;
+    /// closing it leaves only explicitly enabled metric items polling them.
+    func setServingStatsSubmenuOpen(_ isOpen: Bool) {
+        guard servingStatsSubmenuOpen != isOpen else {
+            return
+        }
+
+        servingStatsSubmenuOpen = isOpen
+        if isOpen {
+            // The next pass fetches all-time data immediately instead of waiting
+            // for the submenu's lower-frequency cadence.
+            tickCount = 0
+        }
+    }
+
     /// Any enabled menubar metric item polls at the user-configured refresh
     /// interval (read live from UserDefaults so setting changes apply on the
-    /// next loop pass); otherwise the idle 2 s cadence keeps the Serving
-    /// Stats submenu fresh at minimal cost.
+    /// next loop pass); otherwise the idle 2 s cadence keeps public session
+    /// data fresh without background admin traffic.
     var currentPollingInterval: TimeInterval {
         enabledMetrics.any ? MenubarMetricPrefs.refreshInterval : idleInterval
+    }
+
+    var needsLiveActivity: Bool {
+        enabledMetrics.live || servingStatsSubmenuOpen
+    }
+
+    var needsAlltimeStats: Bool {
+        enabledMetrics.alltime || servingStatsSubmenuOpen
     }
 
     deinit {
@@ -320,6 +346,15 @@ final class MenubarStatsPoller {
     // MARK: - Polling
 
     func refreshOnce() async {
+        // Opening the hosted submenu requests a prompt refresh. If it lands
+        // during the timer's fetch, that fetch completes with the current
+        // demand and the next timer pass picks up any newly enabled scope.
+        guard !refreshInProgress else {
+            return
+        }
+        refreshInProgress = true
+        defer { refreshInProgress = false }
+
         let alltimeEveryNTicks = max(
             1,
             Int((alltimeRefreshInterval / currentPollingInterval).rounded())
@@ -331,13 +366,13 @@ final class MenubarStatsPoller {
             self.sessionStats = s
             self.lastStatusSuccessAt = Date()
             do {
-                // Current Requests remains available in Serving Stats even
-                // when the optional LIV glyph is disabled.
-                self.liveStats = try await fetchAdminActivity()
+                if needsLiveActivity {
+                    self.liveStats = try await fetchAdminActivity()
+                }
             } catch {
                 clearLiveStats(shouldPostUpdate: false)
             }
-            if fetchAlltime, hasAPIKey,
+            if fetchAlltime, needsAlltimeStats, hasAPIKey,
                let alltime = try? await fetchAdminStats(scope: "alltime") {
                 self.alltimeStats = alltime
             }

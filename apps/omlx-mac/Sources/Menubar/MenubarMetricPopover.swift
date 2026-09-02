@@ -145,6 +145,83 @@ struct ServingStatsScopeView: View {
     }
 }
 
+/// The compact main-menu overview reuses the serving leaves without the
+/// standalone popovers' activity graphs or unavailable-state notes.
+struct ServingStatsMenuPanel: View {
+    let live: ServingStatsSnapshot
+    let average: ServingStatsSnapshot
+    let alltime: ServingStatsSnapshot
+    let liveSeries: MenubarMetricsStore.Series
+    let averageSeries: MenubarMetricsStore.Series
+    let alltimeSeries: MenubarMetricsStore.Series
+    let serverIsRunning: Bool
+
+    @Environment(\.omlxTheme) private var theme
+
+    var body: some View {
+        Group {
+            switch ServingStatsPresentation.menuComposition(serverIsRunning: serverIsRunning) {
+            case .serverOff:
+                Text(String(
+                    localized: "menubar.stats.server_off",
+                    defaultValue: "Server is off",
+                    comment: "Disabled placeholder in the Serving Stats submenu when the server isn't running"
+                ))
+                .font(.omlxText(11))
+                .foregroundStyle(theme.textTertiary)
+                .padding(.vertical, 14)
+            case .sections(let sections):
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(sections) { section in
+                        compactScope(section)
+                        if section.kind != .alltime {
+                            SectionRule()
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: MenubarStatsPanelLayout.contentWidth, alignment: .leading)
+        .padding(.horizontal, MenubarStatsPanelLayout.horizontalInset)
+        .padding(.vertical, MenubarStatsPanelLayout.verticalInset)
+        .frame(width: MenubarStatsPanelLayout.width)
+    }
+
+    private func compactScope(
+        _ section: ServingStatsPresentation.ScopeComposition
+    ) -> some View {
+        ServingStatsScopeView(
+            snapshot: snapshot(for: section.kind),
+            series: series(for: section.kind),
+            serverIsRunning: serverIsRunning,
+            composition: section,
+            showsStatusNote: false
+        )
+    }
+
+    private func snapshot(for kind: MenubarMetricsStore.Kind) -> ServingStatsSnapshot {
+        switch kind {
+        case .live:
+            return live
+        case .average:
+            return average
+        case .alltime:
+            return alltime
+        }
+    }
+
+    private func series(for kind: MenubarMetricsStore.Kind) -> MenubarMetricsStore.Series {
+        switch kind {
+        case .live:
+            return liveSeries
+        case .average:
+            return averageSeries
+        case .alltime:
+            return alltimeSeries
+        }
+    }
+}
+
 enum ServingStatsPresentation {
     enum TerminalDetail: Equatable {
         case currentRequests

@@ -27,6 +27,7 @@ import XCTest
 private final class MenubarStatsRequestRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var activityRequestCount = 0
+    private var alltimeStatsRequestCount = 0
     private var activityResponseStatusCode = 200
     private var publicStatusResponseStatusCode = 200
     private var updateNotificationCount = 0
@@ -35,6 +36,7 @@ private final class MenubarStatsRequestRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         activityRequestCount = 0
+        alltimeStatsRequestCount = 0
         activityResponseStatusCode = 200
         publicStatusResponseStatusCode = 200
         updateNotificationCount = 0
@@ -50,6 +52,18 @@ private final class MenubarStatsRequestRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return activityRequestCount
+    }
+
+    func recordAlltimeStatsRequest() {
+        lock.lock()
+        defer { lock.unlock() }
+        alltimeStatsRequestCount += 1
+    }
+
+    func recordedAlltimeStatsRequestCount() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return alltimeStatsRequestCount
     }
 
     func setActivityResponseStatusCode(_ statusCode: Int) {
@@ -100,6 +114,10 @@ private final class MenubarStatsURLProtocol: URLProtocol, @unchecked Sendable {
         requestRecorder.recordedActivityRequestCount()
     }
 
+    static func recordedAlltimeStatsRequestCount() -> Int {
+        requestRecorder.recordedAlltimeStatsRequestCount()
+    }
+
     static func setActivityResponseStatusCode(_ statusCode: Int) {
         requestRecorder.setActivityResponseStatusCode(statusCode)
     }
@@ -138,6 +156,9 @@ private final class MenubarStatsURLProtocol: URLProtocol, @unchecked Sendable {
         } else if url.path == "/admin/api/activity" {
             Self.requestRecorder.recordActivityRequest()
             statusCode = Self.requestRecorder.currentActivityResponseStatusCode()
+        } else if url.path == "/admin/api/stats", scope == "alltime" {
+            Self.requestRecorder.recordAlltimeStatsRequest()
+            statusCode = 200
         } else {
             statusCode = 200
         }
@@ -489,8 +510,9 @@ final class MenubarControllerPortTests: XCTestCase {
 
         XCTAssertEqual(poller.sessionStats?.totalPromptTokens, 99)
         XCTAssertEqual(poller.liveStats?.liveActivity?.groups.first?.requests.first?.title, "128 tk")
-        XCTAssertEqual(poller.alltimeStats?.totalRequests, 3)
+        XCTAssertNil(poller.alltimeStats)
         XCTAssertEqual(MenubarStatsURLProtocol.recordedActivityRequestCount(), 1)
+        XCTAssertEqual(MenubarStatsURLProtocol.recordedAlltimeStatsRequestCount(), 0)
     }
 
     func testPollingFollowsRefreshIntervalOnlyWhileAMetricItemIsEnabled() {
@@ -564,7 +586,7 @@ final class MenubarControllerPortTests: XCTestCase {
         XCTAssertEqual(MenubarStatsURLProtocol.recordedUpdateNotificationCount(), 1)
     }
 
-    func testRefreshOnceLoadsCurrentRequestsWhenLiveGlyphIsDisabled() async {
+    func testClosedServingStatsSubmenuDoesNotPollAdminEndpoints() async {
         let sessionConfiguration = URLSessionConfiguration.ephemeral
         sessionConfiguration.protocolClasses = [MenubarStatsURLProtocol.self]
         let poller = MenubarStatsPoller(
@@ -577,8 +599,39 @@ final class MenubarControllerPortTests: XCTestCase {
         await poller.refreshOnce()
 
         XCTAssertEqual(poller.sessionStats?.totalPromptTokens, 99)
+        XCTAssertNil(poller.liveStats)
+        XCTAssertNil(poller.alltimeStats)
+        XCTAssertEqual(MenubarStatsURLProtocol.recordedActivityRequestCount(), 0)
+        XCTAssertEqual(MenubarStatsURLProtocol.recordedAlltimeStatsRequestCount(), 0)
+    }
+
+    func testServingStatsSubmenuActivatesLiveAndAlltimePollingWithoutGlyphs() async {
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [MenubarStatsURLProtocol.self]
+        let poller = MenubarStatsPoller(
+            baseURL: URL(string: "http://omlx.test")!,
+            apiKey: "test-key",
+            sessionConfiguration: sessionConfiguration
+        )
+        poller.setEnabledMetrics(EnabledMetrics(live: false, average: false, alltime: false))
+
+        poller.setServingStatsSubmenuOpen(true)
+        XCTAssertTrue(poller.servingStatsSubmenuOpen)
+        XCTAssertTrue(poller.needsLiveActivity)
+        XCTAssertTrue(poller.needsAlltimeStats)
+
+        await poller.refreshOnce()
+
+        XCTAssertEqual(poller.sessionStats?.totalPromptTokens, 99)
         XCTAssertNotNil(poller.liveStats?.liveActivity)
+        XCTAssertEqual(poller.alltimeStats?.totalRequests, 3)
         XCTAssertEqual(MenubarStatsURLProtocol.recordedActivityRequestCount(), 1)
+        XCTAssertEqual(MenubarStatsURLProtocol.recordedAlltimeStatsRequestCount(), 1)
+
+        poller.setServingStatsSubmenuOpen(false)
+        XCTAssertFalse(poller.servingStatsSubmenuOpen)
+        XCTAssertFalse(poller.needsLiveActivity)
+        XCTAssertFalse(poller.needsAlltimeStats)
     }
 
     func testRefreshOnceClearsLiveActivityAfterActivityFailure() async {
