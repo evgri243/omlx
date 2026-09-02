@@ -176,10 +176,16 @@ final class MenubarStatsPoller {
 
                 return Request(
                     id: "prefill-\(index)",
-                    title: "\(percentage)% · \(ActivityFormat.tokens(processedTokens)) / \(ActivityFormat.tokens(totalTokens)) tk",
+                    title: "\(percentage)% · \(formatPrefillProgressTokenCount(processedTokens)) / \(formatPrefillProgressTokenCount(totalTokens)) tk",
                     detail: "\(ActivityFormat.rate(max(0, progress.speed ?? 0))) tk/s",
                     kind: .prefill
                 )
+            }
+
+            private static func formatPrefillProgressTokenCount(_ count: Int) -> String {
+                guard count >= 1_000 else { return "\(count)" }
+                guard count < 10_000 else { return ActivityFormat.tokens(count) }
+                return String(format: "%.1fk", Double(count) / 1_000)
             }
 
             private static func generation(index: Int, progress: GenerationProgress) -> Request {

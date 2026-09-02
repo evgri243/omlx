@@ -486,7 +486,7 @@ struct CurrentRequestsView: View {
                 } else {
                     ForEach(activity.groups) { group in
                         Text(group.modelID)
-                            .font(.omlxMono(11.5, weight: .medium))
+                            .font(.omlxMono(12, weight: .medium))
                             .foregroundStyle(theme.textSecondary)
                             .lineLimit(1)
                         ForEach(group.requests) { request in
@@ -537,7 +537,7 @@ struct CurrentRequestsView: View {
                     .fill(marker.color(in: theme))
                     .frame(width: 6, height: 6)
                 Text(marker.abbreviation)
-                    .font(.omlxMono(10))
+                    .font(.omlxMono(12, weight: .medium))
                     .foregroundStyle(marker.color(in: theme))
             }
             Text(request.title)

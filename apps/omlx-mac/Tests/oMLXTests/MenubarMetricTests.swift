@@ -241,6 +241,34 @@ final class MenubarMetricTests: XCTestCase {
         XCTAssertEqual(live.liveActivity?.queuedRequestCount, 2)
     }
 
+    func testPrefillTitlesCompactOnlyProgressCounts() throws {
+        let stats = try decodeStats(
+            """
+            {
+              "active_models": {
+                "models": [{
+                  "id": "model-a",
+                  "prefilling": [
+                    {"processed": 999, "total": 1000, "speed": 0},
+                    {"processed": 1024, "total": 1700, "speed": 0},
+                    {"processed": 10000, "total": 12400, "speed": 0}
+                  ],
+                  "generating": [{"generated_tokens": 9999, "tokens_per_second": 0}]
+                }]
+              }
+            }
+            """
+        )
+        let requests = try XCTUnwrap(
+            MenubarMetricsStore.snapshot(for: .live, from: stats)?.liveActivity?.groups.first?.requests
+        )
+
+        XCTAssertEqual(requests[0].title, "100% · 999 / 1.0k tk")
+        XCTAssertEqual(requests[1].title, "60% · 1.0k / 1.7k tk")
+        XCTAssertEqual(requests[2].title, "81% · 10k / 12.4k tk")
+        XCTAssertEqual(requests[3].title, "9,999 tk")
+    }
+
     func testDetailedServingStatsPopoversKeepOneActivityBlockAndScopeSpecificTerminalDetail() {
         let live = ServingStatsPresentation.popoverScope(for: .live)
         let average = ServingStatsPresentation.popoverScope(for: .average)
